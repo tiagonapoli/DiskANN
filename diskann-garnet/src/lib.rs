@@ -384,7 +384,7 @@ pub unsafe extern "C" fn create_index(
                 context,
             ) {
                 unsafe { *quantization_needed = quant_needed };
-                Arc::into_raw(index).cast::<c_void>()
+                trace_index_creation(ctx, index)
             } else {
                 ptr::null()
             }
@@ -404,7 +404,7 @@ pub unsafe extern "C" fn create_index(
                 context,
             ) {
                 unsafe { *quantization_needed = quant_needed };
-                Arc::into_raw(index).cast::<c_void>()
+                trace_index_creation(ctx, index)
             } else {
                 ptr::null()
             }
@@ -425,7 +425,7 @@ pub unsafe extern "C" fn create_index(
                 context,
             ) {
                 unsafe { *quantization_needed = quant_needed };
-                Arc::into_raw(index).cast::<c_void>()
+                trace_index_creation(ctx, index)
             } else {
                 ptr::null()
             }
@@ -441,9 +441,26 @@ pub unsafe extern "C" fn create_index(
 ///
 /// FFI
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn drop_index(_ctx: u64, index_ptr: *const c_void) {
+pub unsafe extern "C" fn drop_index(ctx: u64, index_ptr: *const c_void) {
+    log_index_lifetime("drop", ctx, index_ptr);
     // SAFETY: Caller must pass in a valid pointer returned from `create_index`.
     let _ = unsafe { Arc::from_raw(index_ptr.cast::<Index>()) };
+}
+
+/// Leaks the created index to a raw pointer and logs it so create/drop pairs can be matched.
+fn trace_index_creation(ctx: u64, index: Arc<Index>) -> *const c_void {
+    let index_ptr = Arc::into_raw(index).cast::<c_void>();
+    log_index_lifetime("create", ctx, index_ptr);
+    index_ptr
+}
+
+fn log_index_lifetime(operation: &str, ctx: u64, index_ptr: *const c_void) {
+    let thread = std::thread::current();
+    eprintln!(
+        "[index-lifetime] operation={operation} context={ctx} ptr={index_ptr:p} thread_id={:?} thread_name={}",
+        thread.id(),
+        thread.name().unwrap_or("<unnamed>")
+    );
 }
 
 /// `Cow` type for `Poly<[u8], AlignToEight>` types.
