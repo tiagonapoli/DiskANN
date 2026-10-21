@@ -1154,10 +1154,21 @@ pub unsafe extern "C" fn remove(
     let id = GarnetId::from(id_bytes);
 
     if !index.inner.external_id_exists(&ctx, &id) {
+        index
+            .inner
+            .log(&ctx, "Native remove rejected: external_id_exists=false");
         return false;
     }
 
-    index.inner.remove(&ctx, &id).is_ok()
+    match index.inner.remove(&ctx, &id) {
+        Ok(()) => true,
+        Err(error) => {
+            index
+                .inner
+                .log(&ctx, &format!("Native remove failed: {error:#?}"));
+            false
+        }
+    }
 }
 
 /// Return the approximate count of vectors in the index.

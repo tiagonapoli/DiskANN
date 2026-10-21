@@ -22,12 +22,12 @@ mod tests {
         ImportResult, Index, IndexState, InsertResult, Overflow, VectorQuantType,
         backfill_quant_vectors, build_quant_table, can_import, card, check_external_id_valid,
         check_internal_id_valid, create_index, drop_index, finish_import,
-        garnet::{Context, Term, WriteCallback},
+        garnet::{Context, TERM_BITMASK, Term, WriteCallback},
         import_term, insert,
         provider::DEFAULT_START_POINT_ID,
         quantization::{GarnetQuantizer, MinMax8Bit, Spherical1Bit, Spherical2Bit, Spherical4Bit},
         remove, search_vector, set_attribute, set_quant_state,
-        test_utils::{STORE, Store, q8_state_with_identity_transform},
+        test_utils::{LOGS, STORE, Store, q8_state_with_identity_transform},
     };
 
     /// Creates an index with default test values and returns (index_ptr, Context).
@@ -302,6 +302,72 @@ mod tests {
         unsafe {
             drop_index(ctx.get(), index_ptr);
         }
+    }
+
+    #[test]
+    fn remove_logs_error_after_partial_storage_deletion() {
+        unsafe extern "C" fn report_failed_vector_delete(
+            ctx: u64,
+            key: *const u8,
+            len: usize,
+        ) -> bool {
+            let callback = Store::attach().callbacks().delete_callback();
+            // SAFETY: The callback receives the original valid FFI arguments.
+            let deleted = unsafe { callback(ctx, key, len) };
+            deleted && ctx & TERM_BITMASK != Term::Vector as u64
+        }
+
+        let store = Store::new();
+        let callbacks = store.callbacks();
+        let ctx = Context::new(0);
+        let mut quant_needed = false;
+        // SAFETY: All callbacks and output pointers remain valid for this test.
+        let index_ptr = unsafe {
+            create_index(
+                ctx.get(),
+                2,
+                0,
+                VectorQuantType::NoQuant,
+                Metric::L2 as i32,
+                10,
+                20,
+                DEFAULT_START_POINT_ID,
+                callbacks.read_callback(),
+                callbacks.write_callback(),
+                report_failed_vector_delete,
+                callbacks.rmw_callback(),
+                callbacks.filter_callback(),
+                callbacks.log_callback(),
+                &mut quant_needed,
+            )
+        };
+        assert!(!index_ptr.is_null());
+        assert_eq!(
+            insert_f32_vector(&ctx, index_ptr, 42, &[1.0, 2.0]),
+            InsertResult::Success
+        );
+        let id = 42u32.to_le_bytes();
+        // SAFETY: The index and ID buffer are valid for both calls.
+        unsafe {
+            assert!(!remove(ctx.get(), index_ptr, id.as_ptr(), id.len()));
+            assert!(!check_external_id_valid(
+                ctx.get(),
+                index_ptr,
+                id.as_ptr(),
+                id.len()
+            ));
+        }
+        LOGS.with(|logs| {
+            let logs = logs.lock();
+            assert!(logs.iter().any(|(_, message)| {
+                message.contains("Native delete stages:") && message.contains("vectorDeleted=false")
+            }));
+            assert!(logs.iter().any(|(_, message)| {
+                message.contains("Native remove failed:") && message.contains("Delete")
+            }));
+        });
+        // SAFETY: The index has not been dropped and is no longer used afterward.
+        unsafe { drop_index(ctx.get(), index_ptr) };
     }
 
     #[test]

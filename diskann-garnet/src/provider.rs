@@ -1914,16 +1914,24 @@ impl<T: VectorRepr> Delete for GarnetProvider<T> {
     ) -> impl Future<Output = Result<(), Self::Error>> + Send {
         let id = match self.to_internal_id(context, gid) {
             Ok(id) => id,
-            Err(e) => return future::ready(Err(e)),
+            Err(e) => {
+                self.callbacks.log(
+                    context,
+                    &format!("Native delete mapping lookup failed: {e:?}"),
+                );
+                return future::ready(Err(e));
+            }
         };
 
         // Delete mappings, so vector will no longer be returned.
         let mut ok = true;
-        ok &= self.callbacks.delete_iid(&context.term(Term::ExtMap), id);
-        ok &= self.callbacks.delete_eid(&context.term(Term::IntMap), gid);
+        let external_mapping_deleted = self.callbacks.delete_iid(&context.term(Term::ExtMap), id);
+        ok &= external_mapping_deleted;
+        let internal_mapping_deleted = self.callbacks.delete_eid(&context.term(Term::IntMap), gid);
+        ok &= internal_mapping_deleted;
 
         // It is not an error to fail deleting attributes; they may not exist.
-        let _: bool = self
+        let attributes_deleted = self
             .callbacks
             .delete_iid(&context.term(Term::Attributes), id);
 
@@ -1933,17 +1941,31 @@ impl<T: VectorRepr> Delete for GarnetProvider<T> {
         //     .callbacks
         //     .delete_iid(&context.term(Term::Neighbors), id);
 
-        ok &= self.callbacks.delete_iid(&context.term(Term::Vector), id);
+        let vector_deleted = self.callbacks.delete_iid(&context.term(Term::Vector), id);
+        ok &= vector_deleted;
 
         // It is not an error to fail deleting quantized terms; they may not exist yet.
-        let _: bool = self
+        let quantized_deleted = self
             .callbacks
             .delete_iid(&context.term(Term::Quantized), id);
 
         // Mark the ID free in the FSM.
         if let Err(e) = self.fsm.mark_free(context, id) {
+            self.callbacks.log(
+                context,
+                &format!("Native delete mark_free failed: internalId={id}, error={e:?}"),
+            );
             return future::ready(Err(e.into()));
         };
+
+        if !ok || std::env::var("GARNET_VECTOR_DIAGNOSTICS").is_ok_and(|value| value == "1") {
+            self.callbacks.log(
+                context,
+                &format!(
+                    "Native delete stages: internalId={id}, externalMappingDeleted={external_mapping_deleted}, internalMappingDeleted={internal_mapping_deleted}, attributesDeleted={attributes_deleted}, vectorDeleted={vector_deleted}, quantizedDeleted={quantized_deleted}, markFree=true"
+                ),
+            );
+        }
 
         if !ok {
             return future::ready(Err(GarnetError::Delete.into()));
